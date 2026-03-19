@@ -789,6 +789,13 @@ EOF;
             $stmt->execute($params);
             $affected = $stmt->rowCount();
 
+            $debug = '';
+            if ($this->debug) {
+                $debug .= '<div class="debug"><span class="debug-label">Update Query</span><div class="debug-content">Query: ' . htmlspecialchars($query, ENT_QUOTES, 'UTF-8') . '</div></div>';
+                $debug .= '<div class="debug"><span class="debug-label">Update Parameters</span><div class="debug-content">' . htmlspecialchars(print_r($params, true), ENT_QUOTES, 'UTF-8') . '</div></div>';
+                $debug .= '<div class="debug"><span class="debug-label">Rows Affected</span><div class="debug-content">' . $affected . '</div></div>';
+            }
+
             if ($this->timestamp) {
                 $stmt = $this->pdo->prepare("UPDATE {$this->table} SET {$this->timestamp} = NOW() WHERE {$this->keyfield} = ?");
                 $stmt->execute([$id]);
@@ -799,7 +806,11 @@ EOF;
                 exit;
             }
 
-            return '<div class="success">Entry saved. Affected rows: ' . $affected . '. Query: ' . $this->sanitize($query) . '</div>';
+            if ($affected == 0) {
+                return $debug . '<div class="error">No rows were updated. The record may not exist or the values may be unchanged. ID: ' . $this->sanitize($id) . '</div>';
+            }
+
+            return $debug . '<div class="success">Entry saved successfully. Updated ' . $affected . ' row(s).</div>';
         } catch (PDOException $e) {
             return '<div class="error">Database error: ' . $this->sanitize($e->getMessage()) . '</div>';
         }
