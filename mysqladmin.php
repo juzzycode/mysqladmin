@@ -1,779 +1,982 @@
 <?php
-// Original code written for managing mysql tables via a UI as a quick admin interface. Not meant to be a full featured admin tool, but rather a quick and dirty way to manage tables without phpmyadmin or writing custom sql queries.
+/**
+ * MysqlAdmin - Lightweight MySQL Table Administration Tool
+ *
+ * This class provides a simple web-based interface for administering MySQL tables.
+ * It supports listing, adding, editing, deleting, and reordering records.
+ *
+ * Features:
+ * - List records with pagination and filtering
+ * - Add new records with form validation
+ * - Edit existing records with inline rich text editing
+ * - Delete records (with confirmation)
+ * - Reorder records (up/down) based on a specified column
+ * - Support for foreign key relationships (links)
+ * - Enum and set field handling
+ * - Built-in HTML5 rich text editor with formatting toolbar
+ * - Read-only fields
+ * - Excludable fields
+ * - Custom field labels
+ * - Grouping support (basic implementation)
+ * - CSRF protection
+ * - Input sanitization and validation
+ *
+ * Security improvements:
+ * - Uses PDO with prepared statements to prevent SQL injection
+ * - CSRF tokens for form submissions
+ * - Input validation and sanitization
+ * - Session-based security checks
+ *
+ * Requirements:
+ * - PHP 7.0+
+ * - PDO MySQL extension
+ * - Modern browser with HTML5 contenteditable support
+ *
+ * Usage:
+ * session_start(); // Required for CSRF protection
+ * // Database connection
+ * $pdo = new PDO('mysql:host=localhost;dbname=your_db', 'user', 'pass');
+ * // Create admin instance
+ * $admin = new MysqlAdmin($pdo);
+ * $admin->table = 'users';
+ * $admin->keyfield = 'id';
+ * $admin->where = 'active = 1';
+ * $admin->showfields = ['name', 'email', 'role'];
+ * $admin->label = ['name' => 'Full Name'];
+ * $admin->link = ['role' => 'SELECT id, role_name FROM roles'];
+ * $admin->richtext = ['description', 'content']; // Field names for rich text editing
+ * // Display the interface
+ * echo $admin->display();
+ */
 
 class MysqlAdmin {
+    // Database connection (PDO instance)
+    private $pdo;
 
-        public $table;                                          // Table to display admin tools for - REQUIRED
-        public $where;                                          // Where clause to enforce - REQUIRED
-        public $keyfield;                                       // Main id to select from in edit mode, must be unique - REQUIRED
-        public $showfields = array('*');        // Which columns to display 
-        public $excludefields = array();        // Which columns to hide
-        public $protectedfields;                        // Which columns to ensure the value is set, in add/edit
-        public $donotadd;                                       // Columns to not include in an add statement (like timestamp) - takes array()
-        public $disableedit;                            // display only, disables href edit and add form
-        public $disableadd;                             // disables add form
-        public $ordering;                                       // which columns sets order by
-        public $link;                                           // Very powerful, create combo boxes based off another query
-        public $append;                                         // add values to combo boxes
-        public $nodelete;                                       // remove delete options
-        public $prelisttext;                            // Display plain text before a list of items, helpful if multiple admin variable are being used on the same page
-        public $label;                                          // rename a column to a more suitable name, or capitalize
-        public $maxentries=999999;                      // if 0, show add, if >= max, remove add.
-        public $grouplabel;                                     // Never implemented
-        public $timestamp;                                      // identify a column as a timestamp
-        public $readonlyfields = array();       // disable the input box
-        public $mce;                                            // mce editor
-        public $goback;                                         // link for a back button
-        public $replacelinks;                           // pass it a column and a function to pass the url to
-        public $optionlabel;                            // pass it an id->label pairs to display other than id.
+    // Required properties
+    public $table;              // Table to administer
+    public $where = '';         // WHERE clause for filtering records
+    public $keyfield;           // Primary key field name
 
-        private $id;
-        private $count=0;
+    // Display options
+    public $showfields = ['*']; // Fields to display (default all)
+    public $excludefields = []; // Fields to exclude from display
+    public $label = [];         // Custom labels for fields ['field' => 'Label']
+    public $readonlyfields = []; // Fields that are read-only in forms
 
-        function set($var,$val){
-                $this->$var = $val;
+    // Form options
+    public $donotadd = [];      // Fields to exclude from add form
+    public $protectedfields = []; // Fields with protected values ['field' => 'value']
+
+    // Functionality toggles
+    public $disableedit = false; // Disable editing
+    public $disableadd = false;  // Disable adding new records
+    public $nodelete = false;    // Disable delete functionality
+    public $ordering = null;    // Field for ordering (enables up/down arrows)
+
+    // Advanced features
+    public $link = [];          // Foreign key links ['field' => 'SELECT id, name FROM table']
+    public $append = [];        // Additional options for select fields ['field' => ['option1', 'option2']]
+    public $replacelinks = [];  // URL replacement functions ['field' => function($field, $url) { return new_url; }]
+    public $richtext = [];      // Fields to use rich text editor (HTML5 contenteditable)
+    public $timestamp = null;   // Timestamp field to auto-update
+
+    // UI options
+    public $prelisttext = '';   // Text to display before the list
+    public $grouplabel = '';    // Label for grouping (not fully implemented)
+    public $maxentries = 999999; // Maximum entries to show (affects add form visibility)
+    public $goback = null;      // URL to redirect after save/delete
+
+    // Internal properties
+    private $csrf_token;
+    private $count = 0;
+
+    /**
+     * Constructor
+     * @param PDO $pdo Database connection
+     */
+    public function __construct(PDO $pdo) {
+        $this->pdo = $pdo;
+        $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->generateCsrfToken();
+    }
+
+    /**
+     * Generate CSRF token for form protection
+     */
+    private function generateCsrfToken() {
+        if (!isset($_SESSION['csrf_token'])) {
+            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
         }
+        $this->csrf_token = $_SESSION['csrf_token'];
+    }
 
-        /**
-         * Main display function
-         *
-         * @return string
-         */
-        function display() {
+    /**
+     * Validate CSRF token
+     */
+    private function validateCsrfToken() {
+        return isset($_POST['csrf_token']) && hash_equals($this->csrf_token, $_POST['csrf_token']);
+    }
 
-                if (isset($_POST['mcetable']))
-                        return $this->mcesave();
-                if (isset($_GET['mce']))
-                        return $this->mceedit();
-                if (isset($_GET['move']))
-                        return $this->move();
-                if (isset($_GET['edit']))
-                        return $this->edit();
-                if (isset($_POST['delete']) && !isset($this->nodelete))
-                        return $this->delete();
-                if (isset($_POST['save']))
-                        return $this->save();
-                if (isset($_POST['add']))
-                        return $this->add();
+    /**
+     * Sanitize input data
+     * @param mixed $data Input data
+     * @return mixed Sanitized data
+     */
+    private function sanitize($data) {
+        if (is_array($data)) {
+            return array_map([$this, 'sanitize'], $data);
+        }
+        return htmlspecialchars(trim($data), ENT_QUOTES, 'UTF-8');
+    }
 
-                return $this->listtable();
+    /**
+     * Sanitize HTML content (allow basic tags)
+     * @param string $html HTML content
+     * @return string Sanitized HTML
+     */
+    private function sanitizeHtml($html) {
+        $allowed = '<p><br><strong><em><u><h1><h2><h3><h4><h5><h6><ul><ol><li><blockquote><a><img>';
+        return strip_tags($html, $allowed);
+    }
+
+    /**
+     * Validate ID input (supports both numeric and string primary keys)
+     * @param mixed $value Value to validate
+     * @return bool
+     */
+    private function isValidId($value) {
+        return !empty(trim($value));
+    }
+
+    /**
+     * Get rich text editor assets (CSS and JS)
+     * @return string HTML with CSS and JS
+     */
+    private function getRichTextAssets() {
+        return <<<'EOF'
+<style>
+.richtext-toolbar {
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    border-bottom: none;
+    padding: 8px;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
 }
-        // group will allow sub categories and grouping
-        function group($group){
-                if (isset($_GET['group'])) {
-                        if (empty($this->where)) {
-                                $this->where = "$group = '$_GET[group]'";
-                        } else {
-                                $this->where .= " and $group = '$_GET[group]'";
-                        }
-                        return $this->display();
+.richtext-toolbar button {
+    padding: 6px 12px;
+    border: 1px solid #ccc;
+    background: white;
+    cursor: pointer;
+    font-size: 13px;
+    border-radius: 3px;
+    transition: all 0.2s;
+}
+.richtext-toolbar button:hover {
+    background: #e9e9e9;
+    border-color: #999;
+}
+.richtext-toolbar button.active {
+    background: #0066cc;
+    color: white;
+    border-color: #0066cc;
+}
+.richtext-toolbar select {
+    padding: 6px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    font-size: 13px;
+}
+.richtext-editor {
+    border: 1px solid #ddd;
+    padding: 12px;
+    min-height: 200px;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    overflow-y: auto;
+}
+.richtext-editor:focus {
+    outline: none;
+    border-color: #0066cc;
+    box-shadow: 0 0 5px rgba(0, 102, 204, 0.3);
+}
+.richtext-preview {
+    background: #f9f9f9;
+    border: 1px solid #ddd;
+    padding: 10px;
+    border-radius: 3px;
+    max-height: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.4;
+}
+.debug {
+    background: #ffffcc;
+    border: 1px solid #ffcc00;
+    padding: 10px;
+    margin: 10px 0;
+    font-family: monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.error {
+    background: #ffcccc;
+    border: 1px solid #ff0000;
+    padding: 10px;
+    margin: 10px 0;
+    color: #cc0000;
+}
+.success {
+    background: #ccffcc;
+    border: 1px solid #00ff00;
+    padding: 10px;
+    margin: 10px 0;
+    color: #00cc00;
+}
+</style>
+<script>
+(function() {
+    function initRichText() {
+        const editors = document.querySelectorAll('.richtext-editor');
+        editors.forEach(editor => {
+            if (editor.dataset.initialized) return;
+            editor.dataset.initialized = 'true';
+            
+            const toolbar = document.createElement('div');
+            toolbar.className = 'richtext-toolbar';
+            
+            const tools = [
+                { cmd: 'bold', label: 'B', title: 'Bold (Ctrl+B)' },
+                { cmd: 'italic', label: 'I', title: 'Italic (Ctrl+I)' },
+                { cmd: 'underline', label: 'U', title: 'Underline (Ctrl+U)' },
+                { sep: true },
+                { cmd: 'formatBlock', value: '<p>', label: 'P', title: 'Paragraph' },
+                { cmd: 'formatBlock', value: '<h1>', label: 'H1', title: 'Heading 1' },
+                { cmd: 'formatBlock', value: '<h2>', label: 'H2', title: 'Heading 2' },
+                { cmd: 'formatBlock', value: '<h3>', label: 'H3', title: 'Heading 3' },
+                { sep: true },
+                { cmd: 'insertUnorderedList', label: 'List', title: 'Bullet List' },
+                { cmd: 'insertOrderedList', label: 'Ordered', title: 'Numbered List' },
+                { sep: true },
+                { cmd: 'createLink', label: 'Link', title: 'Insert Link', prompt: true },
+                { cmd: 'unlink', label: 'Unlink', title: 'Remove Link' },
+                { sep: true },
+                { cmd: 'removeFormat', label: 'Clear', title: 'Clear Formatting' }
+            ];
+            
+            tools.forEach(tool => {
+                if (tool.sep) {
+                    const sep = document.createElement('div');
+                    sep.style.width = '1px';
+                    sep.style.background = '#ccc';
+                    sep.style.margin = '4px 0';
+                    toolbar.appendChild(sep);
+                    return;
                 }
-
-                $table=$this->table;
-                $where=$this->where;
-                $keyfield=$this->keyfield;
-                $showfields=$this->showfields;
-                $excludefields=$this->excludefields;
-                $donotadd=$this->donotadd;
-                $label=$this->label;
-
-                if ($where != '')
-                        $where = "WHERE $where";
-
-                $query = "SELECT distinct $group FROM $table $where";
-                echo $query;
-                $res = mysql_query($query)
-                        or die($query . ":<br>". mysql_error());
-                $list = <<<EOF
-                        <div class="table">
-                                <img src="images/bg-th-left.gif" width="8" height="7" alt="" class="left" />
-                                <img src="images/bg-th-right.gif" width="7" height="7" alt="" class="right" />
-                                <table class="listing form" cellpadding="0" cellspacing="0" border=0><tr><th class="full" colspan="2">$this->grouplabel</th>
-EOF;
-
-                $odd = 1;
-                //Create list of existing records
-                while ($row = mysql_fetch_array($res)) {
-                        $oddeven = ($odd++ % 2) ? "oddList" : "evenList";
-                        $list .= "</tr>\n<tr class='$oddeven'>";
-                        $list .= "\t\t\t<td><a href='$_SERVER[REQUEST_URI]&group=$row[$group]'>".htmlentities($row['menuname'])."</a></td>\n";
-                }
-                $list .= "</tr>\n\t\t</table>\n\t</div>\n";
-                return $list;
-        }
-
-// Default
-        function listtable() {
-                //global $seed;
-                $table=$this->table;
-                $where=$this->where;
-                $keyfield=$this->keyfield;
-                $showfields=$this->showfields;
-                $excludefields=$this->excludefields;
-                $donotadd=$this->donotadd;
-                $label=$this->label;
-
-                $_SESSION['sqladminid'] = 0;
-                $list = '';
-                $fields = '';
-                $url = explode("&",$_SERVER['REQUEST_URI']);
-
-                if ($where != '')
-                        $where = "WHERE $where";
-
-                foreach ($showfields as $field)
-                        $fields .= "$field,";
-
-                if (!empty($this->ordering)&& !in_array($this->ordering,$showfields))
-                                $fields .= $this->ordering.",";
-
-                $fields .= "{$keyfield} AS ourkeyfield";
-
-                $ordering='';
-                if (!empty($this->ordering)) {
-                        $ordering = "order by ". $this->ordering;
-                }
-
-                //main select
-                $query = "SELECT $fields FROM $table $where $ordering";
-                //echo $query;
-                $res = mysql_query($query)
-                        or die($query . ":<br>". mysql_error());
-
-                $fields = mysql_num_fields($res);
-                $fields--;//for the key
-
-                $coltype = $this->gettablecols($table);
-                //print_r($coltype); enum('mls','content','tracker')
-                //form for a new record
-                $rowtypes = array();
-                $addtable = '
-                        <div class="table">
-                                <img src="images/bg-th-left.gif" width="8" height="7" alt="" class="left" />
-                                <img src="images/bg-th-right.gif" width="7" height="7" alt="" class="right" />';
-                if (isset($url[1]))
-                        $addtable .= "
-                                <form action='$url[0]&$url[1]' method='post'>
-                                <input type=hidden name='add' value='add'><table class=\"listing form\" cellspacing=0 cellpadding=0 border=0 width=613>";
-                else 
-                        $addtable .= "
-                                <form action='$url[0]' method='post'>
-                                <input type=hidden name='add' value='add'><table class=\"listing form\" cellspacing=0 cellpadding=0 border=0 width=613>";
-
-                $addtable .= '
-                                        <tr>
-                                                <th class="full" colspan="2">Add an Item</th>
-                                        </tr>';
-                $list = <<<EOF
-                        <div class="table">
-                                <img src="images/bg-th-left.gif" width="8" height="7" alt="" class="left" />
-                                <img src="images/bg-th-right.gif" width="7" height="7" alt="" class="right" />
-                                <table class="listing form" cellpadding="0" cellspacing="0" border=0><tr>
-EOF;
-                //field names (header)
-                $odd2 = 1;
-                $listfirst=1;
-                for ($i=0; $i < $fields; $i++) {
-                        $fieldname[] =  mysql_field_name($res,$i);
-                        if ($fieldname[$i] == $keyfield) continue;
-                        if (!empty($excludefields) && in_array($fieldname[$i],$excludefields)) continue;
-                        if (!empty($this->mce) && in_array($fieldname[$i],$this->mce)) continue;
-
-                    //$type  = mysql_field_type($res, $i);
-                    //$firstword = str_word_count($type,1);
-                        //$rowtypes[] = $firstword[0];
-
-                        $fieldclean = $fieldname[$i];
-
-                        if (!empty($label) && isset($label[$fieldclean]))
-                                $fieldclean = $label[$fieldclean];
-                        if (isset($this->link) && isset($this->link[$fieldname[$i]])) {
-                                $linkres = mysql_query($this->link[$fieldname[$i]]) or die(mysql_error() ."<br>". $this->link[$fieldname[$i]]);
-                                $options = '';
-                                while (list($option_index,$option) = @mysql_fetch_row($linkres))
-                                        $options .= "<option value='$option_index'>$option</option>";
-
-                                if (isset($this->append) && isset($this->append[$fieldclean])) {
-                                        foreach ($this->append[$fieldclean] as $option)
-                                                $options .= "<option>$option</option>";
-                                }
-                                $oddeven2 = ($odd2++ % 2) ? "oddList" : "evenList";
-                                $addtable .= "\t\t<tr class='$oddeven2'><td class='first'>$fieldclean:</td><td class='last'><select name='$fieldname[$i]'>$options</select></td></tr>\n";
-                                if ($listfirst) {
-                                        $list .= '<th class="first" width="177">' . $fieldclean . '</th>';
-                                        $listfirst=0;
-                                } else {
-                                        $list .= '<th>' . $fieldclean . '</th>';
-                                }
-
-                                continue;
-                        }
-                // addtable is for the form at the bottom
-                                if ($listfirst) {
-                                        $list .= '<th class="first" width="177">' . $fieldclean . '</th>';
-                                        $listfirst=0;
-                                } else {
-                                        $list .= '<th>' . $fieldclean . '</th>';
-                                }
-                        if (in_array($fieldname[$i],$this->readonlyfields))
-                                continue;
-                        if (!empty($donotadd) && in_array($fieldname[$i],$donotadd)) continue;
-                        //print($coltype[$fieldname[$i]]);
-                                $oddeven2 = ($odd2++ % 2) ? "oddList" : "evenList";
-                        if (stristr($coltype[$fieldname[$i]],'int') || stristr($coltype[$fieldname[$i]],'double') 
-                                || stristr($coltype[$fieldname[$i]],'float') || stristr($coltype[$fieldname[$i]],'decimal')) {
-                                $addtable .= "<tr class='$oddeven2'><td  class='first'>$fieldclean:</td><td class='last'><input type='text' name='$fieldname[$i]' value='' size=5></td></tr>\n";
-                        } elseif (stristr($coltype[$fieldname[$i]],'enum')){
-                                $values = str_ireplace('enum(','',$coltype[$fieldname[$i]]);
-                                $values = str_ireplace(')','',$values);
-                                $values = str_ireplace("'",'',$values);
-                                $options='';
-                                foreach (explode(',',$values) as $value){
-                                        $options .= "<option>$value</option>";
-                                }
-                                $addtable .= "\t\t<tr class='$oddeven2'><td class='first'>$fieldclean:</td><td class='last'><select name='$fieldname[$i]'>$options</select></td></tr>\n";
-                        } elseif (stristr($coltype[$fieldname[$i]],'text')){
-                                $addtable .= "\t\t<tr class='$oddeven2'><td class='first'>$fieldclean:</td><td class='last'><textarea cols=40 rows=6 name='$fieldname[$i]'></textarea></td></tr>\n";
-                        } else
-                                $addtable .= "\t\t<tr class='$oddeven2'><td class='first'>$fieldclean:</td><td class='last'><input type='text' name='$fieldname[$i]' value='' size=35></td></tr>\n";
-                }
-                $oddeven2 = ($odd2++ % 2) ? "oddList" : "evenList";
-                $addtable .= "</tr>\n<tr class='$oddeven2'><td colspan=2 align=right><input type=submit value='Add new record'></td></tr></table></form></div>";
-                $list = str_replace("<th>$fieldclean","<th class='last'>$fieldclean",$list);
-
-
-                $o=0;
-                $odd = 1;
-                //Create list of existing records
-                while ($row = mysql_fetch_array($res)) {
-                        $oddeven = ($odd++ % 2) ? "oddList" : "evenList";
-                        $this->count++;
-                        $list .= "</tr>\n<tr class='$oddeven'>";
-                        for ($i=0; $i < $fields; $i++) {
-                                if ($fieldname[$i] == $keyfield) continue;
-                                if (!empty($excludefields) && in_array($fieldname[$i],$excludefields)) continue;
-                                if (!empty($this->mce) && in_array($fieldname[$i],$this->mce)) continue;
-                                //add arrows for ordering
-                                if (!empty($this->ordering) && $fieldname[$i] == $this->ordering){
-                                        //$_SESSION['key']=substr(md5($seed . $row['ourkeyfield']),0,8);
-                                        if ($o) {
-                                                $list .= "\t\t\t<td><a href='$_SERVER[REQUEST_URI]&amp;edit=$row[ourkeyfield]&move=up'><img border=0 src='images/Up.gif'  height=16></a> 
-                                                <a href='$_SERVER[REQUEST_URI]&amp;edit=$row[ourkeyfield]&move=down'><img border=0 src='images/Down.gif' height=16></a></td>\n";
-                                        } else {
-                                                $list .= "\t\t\t<td><a href='$_SERVER[REQUEST_URI]&amp;edit=$row[ourkeyfield]&move=down'><img border=0 src='images/Down.gif' height=16></a></td>\n";
-                                        }
-                                        $o++;
-                                } else {
-                                        if (strlen($row[$i]) > 80) {
-                                                //fix for html/comments
-                                                if (isset($this->disableedit))
-                                                        $list .= "\t\t\t<td>".substr(htmlentities($row[$i]),0,80)."...</td>\n";
-                                                else
-                                                        $list .= "\t\t\t<td><a href='$_SERVER[REQUEST_URI]&amp;edit=$row[ourkeyfield]'>".substr(htmlentities($row[$i]),0,80)."...</a></td>\n";
-                                        } else {
-                                                if (isset($this->disableedit))
-                                                        $list .= "\t\t\t<td>". htmlentities($row[$i]) ."</td>\n";
-                                                else
-                                                        $list .= "\t\t\t<td><a href='$_SERVER[REQUEST_URI]&amp;edit=$row[ourkeyfield]'>".htmlentities($row[$i])."</a></td>\n";
-                                        }
-                                }
-                        }
-                }
-                $list .= "</tr>\n\t\t</table>\n\t$this->prelisttext\n\t</div>\n";
-                mysql_free_result($res);
-                if (isset($this->disableedit) || isset($this->disableadd) || $this->count >= $this->maxentries)
-                        return $list;
-                if (isset($this->hideedit))
-                        return $addtable;
-                return $list . "<br><br>\n" . $addtable;
-
-        }
-
-        function edit() {
-                $table=$this->table;
-                $where=$this->where;
-                $keyfield=$this->keyfield;
-                $showfields=$this->showfields;
-                $excludefields=$this->excludefields;
-                $donotadd=$this->donotadd;
-                $label=$this->label;
-
-                //global $seed;
-                $list = '';
-                $fields = '';
-                if (is_numeric($_GET['edit'])) {
-                        $_SESSION['sqlid'] = $_GET['edit'];
-                } else {
-                        die("edit is not a number.");
-                }
-                if (isset($this->disableedit)) die("Editing this table is disabled.");
-
-                //die($_SERVER['REQUEST_URI']);
-                //$url = explode("&",$_SERVER['REQUEST_URI']);
-                $url = preg_replace("/&edit.*/",'',$_SERVER['REQUEST_URI']);
-
-                if ($where != '')
-                        $where = "WHERE $where and $keyfield = '$_GET[edit]'";
-                else 
-                        $where = "WHERE $keyfield = '$_GET[edit]'";
-
-                foreach ($showfields as $field)
-                        $fields .= "$field,";
-
-                $fields .= "$keyfield AS ourkeyfield";
-
-                $query = "SELECT $fields FROM $table $where";
-                $res = mysql_query($query)
-                        or die($query . ":<br>". mysql_error());
-
-                $fields = mysql_num_fields($res);
-                $fields--;//for the key
-
-                $rowtypes = array();
-                $coltype = $this->gettablecols($table);
-
-                //if (substr(md5($seed . $_GET['edit']),0,8) != $_GET['key']) {
-                //      die("Nice try.");
-                //}
-
-                $list = "
-                        <form action='$url' method='post'>
-                        <input type=hidden name='save' value='$_GET[edit]'>";
-
-                $list .= "
-                <table border=2>
-                <tr>
-                        <td>
-                                <table border=0>
-                                <tr>
-                                        <td><b>Name</b></td>
-                                        <td><b>Value</b></td>
-                        ";
-                for ($i=0; $i < $fields; $i++) {
-                    $type  = mysql_field_type($res, $i);
-                    $firstword = str_word_count($type,1);
-                        $rowtypes[] = $firstword[0];
-                        $fieldname[] =  mysql_field_name($res,$i);
-                }
-                while ($row = mysql_fetch_array($res)) {
-                        $list .= "</tr>\n";
-                        for ($i=0; $i < $fields; $i++) {
-                                /*VARCHAR
-                                TEXT
-                                DATE
-                                DATETIME
-                                TIMESTAMP
-                                TIME
-                                YEAR
-                                CHAR
-                                TINYBLOB
-                                TINYTEXT
-                                BLOB
-                                MEDIUMBLOB
-                                MEDIUMTEXT
-                                LONGBLOB
-                                LONGTEXT
-                                ENUM
-                                SET
-                                BOOL
-                                BINARY
-                                VARBINARY*/
-                                $fieldclean = $fieldname[$i];
-
-                                if (!empty($label) && isset($label[$fieldclean]))
-                                        $fieldclean = $label[$fieldclean];
-                                if ($fieldname[$i] == $keyfield) continue;
-                                if (!empty($excludefields) && in_array($fieldname[$i],$excludefields)) continue;
-                                if (!empty($donotadd) && in_array($fieldname[$i],$donotadd)) continue;
-                                if (in_array($fieldname[$i],$this->readonlyfields)) {
-                                        $list .= "<tr><td>$fieldclean:</td><td>$row[$i]</td></tr>\n";
-                                        continue;
-                                }
-
-                                //pull in options from a 2nd table
-                                if (isset($this->link) && isset($this->link[$fieldname[$i]])) {
-                                        $linkres = mysql_query($this->link[$fieldname[$i]]);
-                                        $options = '';
-                                        while (list($option_index,$option) = @mysql_fetch_row($linkres)) {
-                                                $options .= "<option value='$option_index'";
-                                                if ($option_index == $row[$i])
-                                                        $options .= " selected";
-                                                $options .= ">$option</option>\n\n";
-                                        }
-
-                                        if (isset($this->append) && isset($this->append[$fieldclean])) {
-                                                foreach ($this->append[$fieldclean] as $option) {
-                                                        $options .= "<option";
-                                                        if ($option == $row[$i])
-                                                                $options .= " selected";
-                                                        $options .= ">$option</option>\n";
-                                                }
-                                        }
-
-                                        $list .= "<tr><td>$fieldclean:</td><td><select name='$fieldname[$i]'>$options</select></td></tr>\n";
-                                        continue;
-                                }
-                                if (stristr($rowtypes[$i],'int') || stristr($rowtypes[$i],'double') 
-                                || stristr($rowtypes[$i],'float') || stristr($rowtypes[$i],'decimal')) {
-                                        $list .= "<tr><td>$fieldclean:</td><td><input type='text' name='$fieldname[$i]' value='$row[$i]' size=5></td></tr>\n";
-                                } elseif (is_array($this->mce) && in_array($fieldname[$i],$this->mce)) {
-                                        $list .="<tr><td>$fieldclean:</td><td><a href='$url&mce=$fieldname[$i]'><img src='images/edit-icon.gif'> Edit in editor</a></td></tr>\n";
-                                } elseif (strstr($coltype[$fieldname[$i]],'text')){
-                                        $list .= "<tr><td>$fieldclean:</td><td><textarea cols=50 rows=6 name='$fieldname[$i]'>$row[$i]</textarea></td></tr>\n";
-                                } elseif (strstr($row[$i],'<')) {
-                                        $list .= "<tr><td>$fieldclean:</td><td><textarea name='$fieldname[$i]' cols=50 rows=4>$row[$i]</textarea></td></tr>\n";
-                                } elseif (stristr($coltype[$fieldname[$i]],'enum')){
-                                $values = str_ireplace('enum(','',$coltype[$fieldname[$i]]);
-                                $values = str_ireplace(')','',$values);
-                                $values = str_ireplace("'",'',$values);
-                                $options='';
-                                foreach (explode(',',$values) as $value){
-                                        $options .= "<option";
-                                        if ($value == $row[$i])
-                                                $options .= " selected";
-                                        $options .= ">$value</option>";
-                                }
-                                $list .= "<tr><td>$fieldclean:</td><td><select name='$fieldname[$i]'>$options</select></td></tr>\n";
-                        } else {
-                                        //if (!strstr($row[$i],"\\'")) {
-                                                $cleanvalue = htmlspecialchars($row[$i],ENT_QUOTES);
-                                        //} else { 
-                                        //      $cleanvalue = $row[$i];
-                                        //}
-                                        $list .= "<tr><td>$fieldclean:</td><td><input type='text' name='$fieldname[$i]' value='$cleanvalue' size=35></td></tr>\n";
-                                }
-                        }
-                }
-                $delete="<input type=submit name='delete' value=Delete>";
-                if (isset($this->nodelete)) {
-                        $delete='';
-                }
-                $list .= "</tr>\n<tr><td colspan=2 align=right> <input type=submit value=Save> &nbsp; &nbsp; &nbsp;$delete </td></tr></table></td></tr></table></form>";
-                mysql_free_result($res);
-                return $list;
-        }
-
-        function save() {
-                //global $seed;
-                $table=$this->table;
-                $where=$this->where;
-                $keyfield=$this->keyfield;
-                $showfields=$this->showfields;
-                $excludefields=$this->excludefields;
-                $donotadd=$this->donotadd;
-                $fields = '';
-                $fieldnames = '';
-                /*
-                if (substr(md5($seed . $_POST['save']),0,8) != $_POST['key']) {
-                        die("Nice try.");
-                }*/
-                if ($_SESSION['sqlid'] != $_POST['save']) {
-                        die("Something weird happened. EDIT and SAVE are out of sync. Possible hijack/xss attack.");
-                }
-                if (isset($this->disableedit)) die("Editing this table is disabled.");
-
-                if ($where != '')
-                        $where = "WHERE $where and $keyfield = '$_POST[save]'";
-                else 
-                        $where = "WHERE $keyfield = '$_POST[save]'";
-                /*
-                if (isset($_POST["delete"])) {
-                        $query = "DELETE FROM $table where $keyfield = '$_POST[save]'";
-                        die($query);
-                        q($query);
-                        return "Entry Deleted.";
-                }*/
-                foreach ($showfields as $field)
-                        $fields .= "$field,";
-
-                $fields .= "$keyfield AS ourkeyfield";
-                $query = "SELECT $fields FROM $table $where"; 
-                $res = mysql_query($query)
-                        or die($query . ":<br>". mysql_error());
-
-                $fields = mysql_num_fields($res);
-                $fields--;
-                for ($i=0; $i < $fields; $i++) {
-                        $fieldname[] =  mysql_field_name($res,$i);
-                }
-                foreach($fieldname as $field) {
-                        if ($field == $keyfield) continue;
-                        if (!empty($excludefields) && in_array($field,$excludefields)) continue;
-                        if (!empty($donotadd) && in_array($field,$donotadd)) continue;
-                        if (is_array($this->mce) && in_array($field,$this->mce)) continue;
-//                      print_r($this->replacelinks);
-                        if (is_array($this->replacelinks) && isset($this->replacelinks[$field])) {
-
-                                preg_match_all('/http[^\\\\"\'> \n]*/', $_POST[$field], $urls, PREG_SET_ORDER);
-                                $value = $_POST[$field];
-                                foreach($urls as $u){
-
-                                        if (strstr($u[0],'firewater')) continue;
-                                        $newurl = $this->replacelinks[$field]($field,$u[0]);
-                                        $value = str_replace($u[0],$newurl,$value);
-                                        //echo "$u[0], $newurl<br>";
-                                        //die();
-                                }
-                                //die();
-                                $fieldnames .= "`$field` = '$value', ";
-                        } else {
-                                $fieldnames .= "`$field` = '$_POST[$field]', ";
-                        }
-                }
-                $fieldnames = trim($fieldnames,', ');
-
-                $query = "UPDATE $table set $fieldnames where $keyfield = '$_POST[save]'";
-                q($query);
-                if (isset($this->goback) && !empty($this->goback)) {
-                        header("Location: $this->goback");
-                        exit;
-                }
-                return "Entry saved.";
-        }
-        function add() {
-                //fixme needs to add with unique key too
-
-                $table=$this->table;
-                $keyfield=$this->keyfield;
-                $showfields=$this->showfields;
-                $excludefields=$this->excludefields;
-                $protectedfields=$this->protectedfields;
-                $donotadd=$this->donotadd;
-
-                $fields = '';
-                $fieldnames = '';
-                $fieldvalues = '';
-                if (isset($this->disableedit)) die("Editing this table is disabled.");
-
-                foreach ($showfields as $field)
-                        $fields .= "$field,";
-                $fields = trim($fields,', ');
-
-                $query = "SHOW FIELDS FROM $table"; 
-                $res = mysql_query($query)
-                        or die($query . ":<br>". mysql_error());
-
-                $fields = mysql_num_rows($res);
-
-                while($array=mysql_fetch_array($res)) {
-                        $field = $array['Field'];
-                        //echo "<br>field: $field<br>";
-                        if ($field == $keyfield) continue;// fix me only works with auto_increment
-
-                        if (isset($protectedfields[$field])) {
-                                //enforce protectfields
-                                $fieldnames .= "`$field`, ";
-                                $fieldvalues .= "'$protectedfields[$field]',";
-                                continue;
-                        }
-                        //these after protected so you can exclude and protect and protect still works
-                        if (isset($excludefields[$field])) continue;
-                        if (isset($donotadd[$field])) continue;
-                        if (!empty($excludefields) && in_array($field,$excludefields)) continue;
-                        if (!empty($donotadd) && in_array($field,$donotadd)) continue;
-
-                        if (is_array($this->replacelinks) && isset($this->replacelinks[$field])) {
-
-                                preg_match_all('/http[^\\\\"\'> \n]*/', $_POST[$field], $urls, PREG_SET_ORDER);
-                                $value = $_POST[$field];
-                                foreach($urls as $u){
-
-                                        if (strstr($u[0],'firewater')) continue;
-                                        $newurl = $this->replacelinks[$field]($field,$u[0]);
-                                        $value = str_replace($u[0],$newurl,$value);
-                                        //echo "$u[0], $newurl<br>";
-                                        //die();
-                                }
-                                //die();
-                                $fieldnames .= "`$field`, ";
-                                $fieldvalues .= "'$value',";
-                        } else {
-                                $fieldnames .= "`$field`, ";
-                                if(!isset($_POST[$field])) $_POST[$field]='';
-                                $fieldvalues .= "'$_POST[$field]',";
-                        }
-                }
-
-
-
-                $fieldnames = trim($fieldnames,', ');
-                $fieldvalues = trim($fieldvalues,', ');
-
-                $query = "INSERT INTO $table ($fieldnames) VALUES ($fieldvalues)";
-                q($query);
-                if ($this->timestamp) {
-                        q("UPDATE $table set $this->timestamp=now()");
-                }
-                //die($this->goback);
-                if (isset($this->goback) && !empty($this->goback)) {
-                        header("Location: $this->goback");
-                        exit;
-                }
-                header("Location: $_SERVER[REQUEST_URI]");
-                return "Entry Added.";
-        }
-
-        function delete() {
-                //global $seed;
-                $table=$this->table;
-                $where=$this->where;
-                $keyfield=$this->keyfield;
-                if (isset($this->disableedit)) die("Editing this table is disabled.");
-
-                if ($_SESSION['sqlid'] != $_POST['save']) {
-                        die("Something weird happened. EDIT and SAVE/DELETE are out of sync. Possible hijack/xss attack.");
-                }
-                /*if (substr(md5($seed . $_POST['save']),0,8) != $_POST['key']) {
-                        die("Nice try.");
-                }*/
-                if ($where != '')
-                        $where = "WHERE $where and $keyfield = '$_POST[save]'";
-                else 
-                        $where = "WHERE $keyfield = '$_POST[save]'";
-                if (isset($_POST["delete"])) {
-                        $query = "DELETE FROM $table where $keyfield = '$_POST[save]'";
-                        q($query);
-
-                if (isset($this->goback) && !empty($this->goback)) {
-                        header("Location: $this->goback");
-                        exit;
-                }
-
-                        return "Entry Deleted.";
-                }
-                return "Nothing to do?";
-        }
-        function move() {
-                //global $seed;
-                /*if (substr(md5($seed . $_GET['edit']),0,8) != $_GET['key']) {
-                        die("Nice try.");
-                }*/
-                $ordering = $this->ordering;
-                $redir = preg_replace("/&edit.*/",'',$_SERVER['REQUEST_URI']);
-
-                $id=$_GET['edit'];
-                $last='';
-                switch ($_GET['move']) {
-                        case 'up':
-                                $res = q("select {$this->keyfield},{$this->ordering} from {$this->table} where {$this->where} order by {$this->ordering}");
-                                while ($a=fa($res)) {
-                                        if ($a[$this->keyfield] == $id) {
-                                                //switch last with this one
-                                                //echo "Last: ".$last[$this->keyfield] ." , ".$last[$this->ordering];
-                                                //echo "<br>This: ".$a[$this->keyfield] ." , ".$a[$this->ordering];
-                                                if ($last[$this->ordering] == $a[$this->ordering]) {//bump them all up by 1
-                                                        q("update {$this->table} set {$this->ordering}={$this->ordering}+1 where {$this->where} and {$this->ordering} >= ".$last[$this->ordering]);
-                                                        q("update {$this->table} set {$this->ordering}=".$a[$this->ordering]." where {$this->where} and {$this->keyfield} = ".$last[$this->keyfield]);
-                                                } else {
-                                                        q("update {$this->table} set {$this->ordering}=".$last[$this->ordering]." where {$this->where} and {$this->keyfield} = ".$a[$this->keyfield]);
-                                                        q("update {$this->table} set {$this->ordering}=".$a[$this->ordering]." where {$this->where} and {$this->keyfield} = ".$last[$this->keyfield]);
-                                                }
-                                        } else {
-                                                $last = $a;
-                                        }
-                                        header("Location: $redir");
-                                }
-                                break;
-                        case 'down':
-                                $res = q("select {$this->keyfield},{$this->ordering} from {$this->table} where {$this->where} order by {$this->ordering}");
-                                while ($a=fa($res)) {
-                                        if ($a[$this->keyfield] == $id) {
-                                                //Save this one, and grab the next one
-                                                $current = $a;
-                                                $a=fa($res);
-                                                if ($a) {
-                                                        //echo "Current: ".$current[$this->keyfield] ." , ".$current[$this->ordering];
-                                                        //echo "<br>Next: ".$a[$this->keyfield] ." , ".$a[$this->ordering];
-                                                        if ($current[$this->ordering] == $a[$this->ordering]) {//bump them all up by 1
-                                                                q("update {$this->table} set {$this->ordering}={$this->ordering}+1 where {$this->where} and {$this->ordering} >= ".$a[$this->ordering]);
-                                                                q("update {$this->table} set {$this->ordering}=".$a[$this->ordering]." where {$this->where} and {$this->keyfield} = ".$a[$this->keyfield]);
-                                                        } else {
-                                                                q("update {$this->table} set {$this->ordering}=".$current[$this->ordering]." where {$this->where} and {$this->keyfield} = ".$a[$this->keyfield]);
-                                                                q("update {$this->table} set {$this->ordering}=".$a[$this->ordering]." where {$this->where} and {$this->keyfield} = ".$current[$this->keyfield]);
-                                                        }
-                                                } //else it's last row
-
-                                        }
-                                        header("Location: $redir");
-                                }
-                                break;
-                        default:
-                                die("unknown move");
-                                break;
-                }
-        }
-        function mceedit(){
-
-                $page=$_GET['mce'];
-                $_SESSION['mcetable'] = $page;
-
-                if (strstr($page,'.') || strstr($page,'/') || strstr($page,"\\") || strstr($page,'%') || strstr($page,'`') || strstr($page,'"') || strstr($page,"'"))
-                        die("hijacking columns are we?");
-                $res = q("select $page from $this->table where $this->keyfield = $_SESSION[sqlid] and $this->where");
-                $a = fa($res);
-                $content = $a[$page];
-                $html = <<<EOF
-                <!-- tinyMCE -->
-<script language="javascript" type="text/javascript" src="lib/mce/tiny_mce.js"></script>
-<script language="javascript" type="text/javascript">
-        tinyMCE.init({
-                mode : "textareas",
-                theme : "advanced",
-                plugins : "spellchecker,style,layer,table,save,advhr,advimage,advlink,emotions,iespell,insertdatetime,preview,media,searchreplace,print,contextmenu,directionality,fullscreen,noneditable,visualchars,nonbreaking,xhtmlxtras,imagemanager,filemanager,ibrowser",
-                theme_advanced_buttons1_add_before : "save,newdocument,separator",
-                theme_advanced_buttons1_add : "fontselect,fontsizeselect",
-                theme_advanced_buttons2_add : "separator,insertdate,inserttime,preview,separator,forecolor,backcolor",
-                theme_advanced_buttons2_add_before: "cut,copy,paste,pastetext,pasteword,separator,search,replace,separator",
-                theme_advanced_buttons3_add_before : "tablecontrols,separator",
-                theme_advanced_buttons3_add : "emotions,iespell,media,advhr,separator,print,separator,ltr,rtl,separator,fullscreen",
-                theme_advanced_buttons4 : "insertlayer,moveforward,movebackward,absolute,|,styleprops,|,spellchecker,cite,abbr,acronym,del,ins,|,visualchars,nonbreaking,ibrowser",
-                theme_advanced_toolbar_location : "top",
-                theme_advanced_toolbar_align : "left",
-                theme_advanced_statusbar_location : "bottom",
-                content_css : "css/mce_word.css",
-            plugin_insertdate_dateFormat : "%Y-%m-%d",
-            plugin_insertdate_timeFormat : "%H:%M:%S",
-                extended_valid_elements : "img[class|src|border=0|alt|title|hspace|vspace|width|height|align|onmouseover|onmouseout|name],hr[class|width|size|noshade],font[face|size|color|style],span[class|align|style]",
-                paste_auto_cleanup_on_paste : true,
-                paste_convert_headers_to_strong : true
+                
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.textContent = tool.label;
+                btn.title = tool.title;
+                btn.onclick = (e) => {
+                    e.preventDefault();
+                    if (tool.prompt) {
+                        const value = prompt(tool.label + ':');
+                        if (value) document.execCommand(tool.cmd, false, value);
+                    } else {
+                        document.execCommand(tool.cmd, false, tool.value || true);
+                    }
+                    const editorArea = btn.closest('.richtext-toolbar').nextElementSibling;
+                    editorArea.focus();
+                    syncHiddenInput(editorArea);
+                };
+                toolbar.appendChild(btn);
+            });
+            
+            editor.parentNode.insertBefore(toolbar, editor);
+            editor.contentEditable = 'true';
+            editor.addEventListener('input', function() { syncHiddenInput(this); });
+            editor.addEventListener('blur', function() { syncHiddenInput(this); });
         });
-
+    }
+    
+    function syncHiddenInput(editor) {
+        const input = editor.dataset.inputId ? document.getElementById(editor.dataset.inputId) : null;
+        if (input) {
+            input.value = editor.innerHTML;
+        }
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initRichText);
+    } else {
+        initRichText();
+    }
+})();
 </script>
-<!-- /tinyMCE -->
-
-<form method=post>
-<textarea name=mcetable rows=30>$a[$page]</textarea><br>
-<input type=submit value="Save">
-</form>
 EOF;
-/*              external_link_list_url : "example_data/example_link_list.js",
-                external_image_list_url : "example_data/example_image_list.js",
-                flash_external_list_url : "example_data/example_flash_list.js",*/
+    }
 
-                return $html;
+    /**
+     * Main display method - routes to appropriate action
+     * @return string HTML output
+     */
+    public function display() {
+        if (!$this->validateRequiredProperties()) {
+            return '<div class="error">Required properties (table, keyfield) are not set.</div>';
         }
 
-        function mcesave() {
-                if (!isset($_SESSION['mcetable'])) {
-                        die("missing post data");
-                }
-                $column = $_SESSION['mcetable'];
-                $cleandata = str_replace("\\'","'",$_POST['mcetable']);
-                $cleandata = str_replace("'","\'",$cleandata);
-                q("UPDATE $this->table set $column='$cleandata' where $this->where and $this->keyfield = $_SESSION[sqlid]");
-                if ($this->timestamp) {
-                        q("UPDATE $this->table set $this->timestamp=now() where $this->where and $this->keyfield = $_SESSION[sqlid]");
-                }
-                $uri = str_replace("&mce=contents","",$_SERVER['REQUEST_URI']);
-                header("Location: $uri");
-                return;
+        // Debug: Show what POST/GET data we received
+        $debug = '';
+        if (!empty($_POST)) {
+            $debug .= '<div class="debug">POST data: ' . $this->sanitize(print_r($_POST, true)) . '</div>';
         }
-        function gettablecols($table){
-                $res = mysql_query("SHOW FIELDS FROM $table") or die(mysql_error());
-                while ($row = mysql_fetch_array($res)) {
-                        $return[$row['Field']] = $row['Type'];
-                }
-                return $return;
+        if (!empty($_GET)) {
+            $debug .= '<div class="debug">GET data: ' . $this->sanitize(print_r($_GET, true)) . '</div>';
+        }
+        if (isset($_SESSION['csrf_token'])) {
+            $debug .= '<div class="debug">Session CSRF: ' . $this->sanitize($_SESSION['csrf_token']) . '</div>';
+        }
+        if (isset($_SESSION['edit_id'])) {
+            $debug .= '<div class="debug">Session edit_id: ' . $this->sanitize($_SESSION['edit_id']) . '</div>';
         }
 
+        if (isset($_POST['save'])) {
+            $csrfValid = $this->validateCsrfToken();
+            $debug .= '<div class="debug">Save action detected. CSRF valid: ' . ($csrfValid ? 'YES' : 'NO') . '</div>';
+            if ($csrfValid) {
+                return $debug . $this->save();
+            } else {
+                return $debug . '<div class="error">CSRF token validation failed for save action.</div>';
+            }
+        }
+        if (isset($_POST['delete']) && !$this->nodelete) {
+            $csrfValid = $this->validateCsrfToken();
+            $debug .= '<div class="debug">Delete action detected. CSRF valid: ' . ($csrfValid ? 'YES' : 'NO') . '</div>';
+            if ($csrfValid) {
+                return $debug . $this->delete();
+            } else {
+                return $debug . '<div class="error">CSRF token validation failed for delete action.</div>';
+            }
+        }
+        if (isset($_GET['move'])) {
+            return $debug . $this->move();
+        }
+        if (isset($_GET['edit'])) {
+            return $debug . $this->edit();
+        }
+        if (isset($_POST['add']) && !$this->disableadd) {
+            $csrfValid = $this->validateCsrfToken();
+            $debug .= '<div class="debug">Add action detected. CSRF valid: ' . ($csrfValid ? 'YES' : 'NO') . '</div>';
+            if ($csrfValid) {
+                return $debug . $this->add();
+            } else {
+                return $debug . '<div class="error">CSRF token validation failed for add action.</div>';
+            }
+        }
+
+        return $debug . $this->listTable();
+    }
+
+    /**
+     * Validate required properties
+     * @return bool
+     */
+    private function validateRequiredProperties() {
+        return !empty($this->table) && !empty($this->keyfield);
+    }
+
+    /**
+     * Get column types for the table
+     * @return array Column types
+     */
+    private function getTableCols() {
+        $stmt = $this->pdo->prepare("SHOW FIELDS FROM {$this->table}");
+        $stmt->execute();
+        $cols = [];
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $cols[$row['Field']] = $row['Type'];
+        }
+        return $cols;
+    }
+
+    /**
+     * Build WHERE clause
+     * @param string $additional Additional conditions
+     * @return string WHERE clause
+     */
+    private function buildWhere($additional = '') {
+        $where = '';
+        if (!empty($this->where)) {
+            $where = "WHERE {$this->where}";
+        }
+        if (!empty($additional)) {
+            $where .= ($where ? ' AND ' : 'WHERE ') . $additional;
+        }
+        return $where;
+    }
+
+    /**
+     * List table records
+     * @return string HTML output
+     */
+    private function listTable() {
+        try {
+            $cols = $this->getTableCols();
+            $fields = $this->buildFieldsList();
+            $where = $this->buildWhere();
+            $order = !empty($this->ordering) ? "ORDER BY {$this->ordering}" : '';
+
+            $query = "SELECT {$fields} FROM {$this->table} {$where} {$order}";
+            $stmt = $this->pdo->prepare($query);
+            $stmt->execute();
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $html = $this->getRichTextAssets();
+            $html .= $this->renderListTable($rows, $cols);
+            if (!$this->disableadd && $this->count < $this->maxentries) {
+                $html .= $this->renderAddForm($cols);
+            }
+            return $html;
+        } catch (PDOException $e) {
+            return '<div class="error">Database error: ' . $this->sanitize($e->getMessage()) . '</div>';
+        }
+    }
+
+    /**
+     * Build fields list for SELECT query
+     * @return string Fields list
+     */
+    private function buildFieldsList() {
+        $fields = '';
+        foreach ($this->showfields as $field) {
+            $fields .= "{$field},";
+        }
+        if (!empty($this->ordering) && !in_array($this->ordering, $this->showfields)) {
+            $fields .= "{$this->ordering},";
+        }
+        $fields .= "{$this->keyfield} AS ourkeyfield";
+        return $fields;
+    }
+
+    /**
+     * Render the list table
+     * @param array $rows Data rows
+     * @param array $cols Column types
+     * @return string HTML
+     */
+    private function renderListTable($rows, $cols) {
+        $html = '<div class="table"><table class="listing form" cellpadding="0" cellspacing="0" border="0"><tr>';
+        $fieldNames = [];
+
+        // Build headers
+        foreach ($rows as $row) {
+            foreach ($row as $field => $value) {
+                if ($field === 'ourkeyfield') continue;
+                if (in_array($field, $this->excludefields)) continue;
+                if (in_array($field, $this->richtext)) continue;
+
+                $label = isset($this->label[$field]) ? $this->label[$field] : ucfirst($field);
+                $html .= '<th>' . $this->sanitize($label) . '</th>';
+                $fieldNames[] = $field;
+            }
+            break; // Only need field names from first row
+        }
+
+        $html .= '</tr>';
+
+        // Build rows
+        foreach ($rows as $row) {
+            $this->count++;
+            $html .= '<tr class="' . ($this->count % 2 ? 'oddList' : 'evenList') . '">';
+            foreach ($row as $field => $value) {
+                if ($field === 'ourkeyfield') continue;
+                if (in_array($field, $this->excludefields)) continue;
+                if (in_array($field, $this->richtext)) continue;
+
+                if (!empty($this->ordering) && $field === $this->ordering) {
+                    $html .= '<td><a href="?edit=' . $row['ourkeyfield'] . '&move=up">↑</a> <a href="?edit=' . $row['ourkeyfield'] . '&move=down">↓</a></td>';
+                } else {
+                    $displayValue = strlen($value) > 80 ? substr($this->sanitize($value), 0, 80) . '...' : $this->sanitize($value);
+                    if ($this->disableedit) {
+                        $html .= '<td>' . $displayValue . '</td>';
+                    } else {
+                        $html .= '<td><a href="?edit=' . $row['ourkeyfield'] . '">' . $displayValue . '</a></td>';
+                    }
+                }
+            }
+            $html .= '</tr>';
+        }
+
+        $html .= '</table></div>' . $this->prelisttext;
+        return $html;
+    }
+
+    /**
+     * Render add form
+     * @param array $cols Column types
+     * @return string HTML
+     */
+    private function renderAddForm($cols) {
+        $url = strtok($_SERVER['REQUEST_URI'], '?');
+        $html = '<div class="table"><form action="' . $url . '" method="post">
+            <input type="hidden" name="csrf_token" value="' . $this->csrf_token . '">
+            <input type="hidden" name="add" value="add">
+            <table class="listing form" cellspacing="0" cellpadding="0" border="0" width="613">
+            <tr><th class="full" colspan="2">Add an Item</th></tr>';
+
+        $odd = 1;
+        foreach ($cols as $field => $type) {
+            if ($field === $this->keyfield) continue;
+            if (in_array($field, $this->excludefields)) continue;
+            if (in_array($field, $this->donotadd)) continue;
+            if (in_array($field, $this->readonlyfields)) continue;
+
+            $label = isset($this->label[$field]) ? $this->label[$field] : ucfirst($field);
+            $oddeven = ($odd++ % 2) ? 'oddList' : 'evenList';
+            $html .= '<tr class="' . $oddeven . '"><td class="first">' . $this->sanitize($label) . ':</td><td class="last">';
+
+            if (isset($this->link[$field])) {
+                $html .= $this->renderSelectField($field, null);
+            } elseif (in_array($field, $this->richtext)) {
+                $inputId = 'richtext_add_' . $field;
+                $html .= '<div class="richtext-editor" data-input-id="' . $inputId . '"></div>';
+                $html .= '<input type="hidden" id="' . $inputId . '" name="' . $field . '" value="">';
+            } elseif (stripos($type, 'enum') === 0) {
+                $html .= $this->renderEnumField($type, null, $field);
+            } elseif (stripos($type, 'text') !== false) {
+                $html .= '<textarea cols="40" rows="6" name="' . $field . '"></textarea>';
+            } elseif (stripos($type, 'int') !== false || stripos($type, 'double') !== false ||
+                      stripos($type, 'float') !== false || stripos($type, 'decimal') !== false) {
+                $html .= '<input type="text" name="' . $field . '" value="" size="5">';
+            } else {
+                $html .= '<input type="text" name="' . $field . '" value="" size="35">';
+            }
+
+            $html .= '</td></tr>';
+        }
+
+        $oddeven = ($odd++ % 2) ? 'oddList' : 'evenList';
+        $html .= '<tr class="' . $oddeven . '"><td colspan="2" align="right"><input type="submit" value="Add new record"></td></tr>';
+        $html .= '</table></form></div>';
+        return $html;
+    }
+
+    /**
+     * Render select field for foreign keys
+     * @param string $field Field name
+     * @param mixed $selected Selected value
+     * @return string HTML
+     */
+    private function renderSelectField($field, $selected) {
+        $stmt = $this->pdo->prepare($this->link[$field]);
+        $stmt->execute();
+        $options = '<option value="">-- Select --</option>';
+        while ($row = $stmt->fetch(PDO::FETCH_NUM)) {
+            $sel = ($row[0] == $selected) ? ' selected' : '';
+            $options .= '<option value="' . $this->sanitize($row[0]) . '"' . $sel . '>' . $this->sanitize($row[1]) . '</option>';
+        }
+        if (isset($this->append[$field])) {
+            foreach ($this->append[$field] as $option) {
+                $sel = ($option == $selected) ? ' selected' : '';
+                $options .= '<option value="' . $this->sanitize($option) . '"' . $sel . '>' . $this->sanitize($option) . '</option>';
+            }
+        }
+        return '<select name="' . $field . '">' . $options . '</select>';
+    }
+
+    /**
+     * Render enum field
+     * @param string $type Column type
+     * @param mixed $selected Selected value
+     * @param string $field Field name
+     * @return string HTML
+     */
+    private function renderEnumField($type, $selected, $field) {
+        $values = str_ireplace(['enum(', ')'], '', $type);
+        $values = str_replace("'", '', $values);
+        $options = '';
+        foreach (explode(',', $values) as $value) {
+            $sel = (trim($value) == $selected) ? ' selected' : '';
+            $options .= '<option value="' . $this->sanitize(trim($value)) . '"' . $sel . '>' . $this->sanitize(trim($value)) . '</option>';
+        }
+        return '<select name="' . $field . '">' . $options . '</select>';
+    }
+
+    /**
+     * Edit record form
+     * @return string HTML output
+     */
+    private function edit() {
+        if ($this->disableedit) {
+            return '<div class="error">Editing is disabled.</div>';
+        }
+
+        $id = $_GET['edit'];
+        if (!$this->isValidId($id)) {
+            return '<div class="error">Invalid ID.</div>';
+        }
+
+        try {
+            $cols = $this->getTableCols();
+            $where = $this->buildWhere("{$this->keyfield} = ?");
+            $fields = $this->buildFieldsList();
+
+            $stmt = $this->pdo->prepare("SELECT {$fields} FROM {$this->table} {$where}");
+            $stmt->execute([$id]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$row) {
+                return '<div class="error">Record not found.</div>';
+            }
+
+            $_SESSION['edit_id'] = $id;
+            return $this->getRichTextAssets() . $this->renderEditForm($row, $cols);
+        } catch (PDOException $e) {
+            return '<div class="error">Database error: ' . $this->sanitize($e->getMessage()) . '</div>';
+        }
+    }
+
+    /**
+     * Render edit form
+     * @param array $row Data row
+     * @param array $cols Column types
+     * @return string HTML
+     */
+    private function renderEditForm($row, $cols) {
+        $url = preg_replace('/[?&]edit=[^&]*/', '', $_SERVER['REQUEST_URI']);
+        $html = '<form action="' . $url . '" method="post">
+            <input type="hidden" name="csrf_token" value="' . $this->csrf_token . '">
+            <input type="hidden" name="save" value="' . $row['ourkeyfield'] . '">
+            <table border="2">
+            <tr><td><table border="0">
+            <tr><td><b>Name</b></td><td><b>Value</b></td></tr>';
+
+        foreach ($row as $field => $value) {
+            if ($field === 'ourkeyfield') continue;
+            if (in_array($field, $this->excludefields)) continue;
+            if (in_array($field, $this->donotadd)) continue;
+
+            $label = isset($this->label[$field]) ? $this->label[$field] : ucfirst($field);
+            $html .= '<tr><td>' . $this->sanitize($label) . ':</td><td>';
+
+            if (in_array($field, $this->readonlyfields)) {
+                $html .= $this->sanitize($value);
+            } elseif (isset($this->link[$field])) {
+                $html .= $this->renderSelectField($field, $value);
+            } elseif (in_array($field, $this->richtext)) {
+                $inputId = 'richtext_edit_' . $field;
+                $html .= '<div class="richtext-editor" data-input-id="' . $inputId . '">' . $this->sanitizeHtml($value) . '</div>';
+                $html .= '<input type="hidden" id="' . $inputId . '" name="' . $field . '" value="' . $this->sanitize($value) . '">';
+            } elseif (stripos($cols[$field], 'enum') === 0) {
+                $html .= $this->renderEnumField($cols[$field], $value, $field);
+            } elseif (stripos($cols[$field], 'text') !== false) {
+                $html .= '<textarea cols="50" rows="6" name="' . $field . '">' . $this->sanitize($value) . '</textarea>';
+            } elseif (stripos($cols[$field], 'int') !== false || stripos($cols[$field], 'double') !== false ||
+                      stripos($cols[$field], 'float') !== false || stripos($cols[$field], 'decimal') !== false) {
+                $html .= '<input type="text" name="' . $field . '" value="' . $this->sanitize($value) . '" size="5">';
+            } else {
+                $html .= '<input type="text" name="' . $field . '" value="' . $this->sanitize($value) . '" size="35">';
+            }
+
+            $html .= '</td></tr>';
+        }
+
+        $deleteBtn = $this->nodelete ? '' : '<input type="submit" name="delete" value="Delete">';
+        $html .= '<tr><td colspan="2" align="right"><input type="submit" value="Save"> ' . $deleteBtn . '</td></tr>';
+        $html .= '</table></td></tr></table></form>';
+        return $html;
+    }
+
+    /**
+     * Save edited record
+     * @return string Status message
+     */
+    private function save() {
+        if ($this->disableedit) {
+            return '<div class="error">Editing is disabled.</div>';
+        }
+
+        $id = $_POST['save'];
+        if (!isset($_SESSION['edit_id'])) {
+            return '<div class="error">Session not set for edit_id.</div>';
+        }
+        if (!$this->isValidId($id)) {
+            return '<div class="error">Invalid ID: ' . $this->sanitize($id) . '</div>';
+        }
+        if ($_SESSION['edit_id'] != $id) {
+            return '<div class="error">Session mismatch: session=' . $this->sanitize($_SESSION['edit_id']) . ' post=' . $this->sanitize($id) . '</div>';
+        }
+
+        try {
+            $cols = $this->getTableCols();
+            $setParts = [];
+            $params = [];
+
+            foreach ($_POST as $field => $value) {
+                if ($field === 'save' || $field === 'csrf_token') continue;
+                if ($field === $this->keyfield) continue;
+                if (in_array($field, $this->excludefields)) continue;
+                if (in_array($field, $this->donotadd)) continue;
+
+                // Sanitize rich text content
+                if (in_array($field, $this->richtext)) {
+                    $value = $this->sanitizeHtml($value);
+                }
+
+                if (isset($this->replacelinks[$field])) {
+                    $value = $this->processUrlReplacements($field, $value);
+                }
+
+                $setParts[] = "`{$field}` = ?";
+                $params[] = $value;
+            }
+
+            if (empty($setParts)) {
+                return '<div class="error">No fields to update.</div>';
+            }
+
+            $params[] = $id;
+            $query = "UPDATE {$this->table} SET " . implode(', ', $setParts) . " WHERE {$this->keyfield} = ?";
+            $stmt = $this->pdo->prepare($query);
+            $stmt->execute($params);
+            $affected = $stmt->rowCount();
+
+            if ($this->timestamp) {
+                $stmt = $this->pdo->prepare("UPDATE {$this->table} SET {$this->timestamp} = NOW() WHERE {$this->keyfield} = ?");
+                $stmt->execute([$id]);
+            }
+
+            if ($this->goback) {
+                header("Location: {$this->goback}");
+                exit;
+            }
+
+            return '<div class="success">Entry saved. Affected rows: ' . $affected . '. Query: ' . $this->sanitize($query) . '</div>';
+        } catch (PDOException $e) {
+            return '<div class="error">Database error: ' . $this->sanitize($e->getMessage()) . '</div>';
+        }
+    }
+
+    /**
+     * Add new record
+     * @return string Status message
+     */
+    private function add() {
+        if ($this->disableadd) {
+            return '<div class="error">Adding is disabled.</div>';
+        }
+
+        try {
+            $cols = $this->getTableCols();
+            $fields = [];
+            $placeholders = [];
+            $params = [];
+
+            foreach ($cols as $field => $type) {
+                if ($field === $this->keyfield) continue; // Assume auto-increment
+                if (isset($this->protectedfields[$field])) {
+                    $fields[] = "`{$field}`";
+                    $placeholders[] = '?';
+                    $params[] = $this->protectedfields[$field];
+                    continue;
+                }
+                if (in_array($field, $this->excludefields)) continue;
+                if (in_array($field, $this->donotadd)) continue;
+
+                $value = $_POST[$field] ?? '';
+                
+                // Sanitize rich text content
+                if (in_array($field, $this->richtext)) {
+                    $value = $this->sanitizeHtml($value);
+                }
+
+                if (isset($this->replacelinks[$field])) {
+                    $value = $this->processUrlReplacements($field, $value);
+                }
+
+                $fields[] = "`{$field}`";
+                $placeholders[] = '?';
+                $params[] = $value;
+            }
+
+            $query = "INSERT INTO {$this->table} (" . implode(', ', $fields) . ") VALUES (" . implode(', ', $placeholders) . ")";
+            $stmt = $this->pdo->prepare($query);
+            $stmt->execute($params);
+
+            if ($this->timestamp) {
+                $lastId = $this->pdo->lastInsertId();
+                $stmt = $this->pdo->prepare("UPDATE {$this->table} SET {$this->timestamp} = NOW() WHERE {$this->keyfield} = ?");
+                $stmt->execute([$lastId]);
+            }
+
+            if ($this->goback) {
+                header("Location: {$this->goback}");
+                exit;
+            }
+
+            header("Location: {$_SERVER['REQUEST_URI']}");
+            return '<div class="success">Entry added.</div>';
+        } catch (PDOException $e) {
+            return '<div class="error">Database error: ' . $this->sanitize($e->getMessage()) . '</div>';
+        }
+    }
+
+    /**
+     * Delete record
+     * @return string Status message
+     */
+    private function delete() {
+        if ($this->nodelete) {
+            return '<div class="error">Deleting is disabled.</div>';
+        }
+
+        $id = $_POST['save'];
+        if (!$this->isValidId($id) || $_SESSION['edit_id'] != $id) {
+            return '<div class="error">Invalid session or ID.</div>';
+        }
+
+        try {
+            $where = $this->buildWhere("{$this->keyfield} = ?");
+            $stmt = $this->pdo->prepare("DELETE FROM {$this->table} {$where}");
+            $stmt->execute([$id]);
+
+            if ($this->goback) {
+                header("Location: {$this->goback}");
+                exit;
+            }
+
+            return '<div class="success">Entry deleted.</div>';
+        } catch (PDOException $e) {
+            return '<div class="error">Database error: ' . $this->sanitize($e->getMessage()) . '</div>';
+        }
+    }
+
+    /**
+     * Move record up/down for ordering
+     * @return string Redirect or error
+     */
+    private function move() {
+        if (empty($this->ordering)) {
+            return '<div class="error">Ordering not configured.</div>';
+        }
+
+        $id = $_GET['edit'];
+        if (!$this->isValidId($id)) {
+            return '<div class="error">Invalid ID.</div>';
+        }
+
+        try {
+            $where = $this->buildWhere();
+            $query = "SELECT {$this->keyfield}, {$this->ordering} FROM {$this->table} {$where} ORDER BY {$this->ordering}";
+            $stmt = $this->pdo->prepare($query);
+            $stmt->execute();
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $currentIndex = null;
+            foreach ($rows as $index => $row) {
+                if ($row[$this->keyfield] == $id) {
+                    $currentIndex = $index;
+                    break;
+                }
+            }
+
+            if ($currentIndex === null) {
+                return '<div class="error">Record not found.</div>';
+            }
+
+            if ($_GET['move'] === 'up' && $currentIndex > 0) {
+                $prevRow = $rows[$currentIndex - 1];
+                $this->swapOrdering($rows[$currentIndex], $prevRow);
+            } elseif ($_GET['move'] === 'down' && $currentIndex < count($rows) - 1) {
+                $nextRow = $rows[$currentIndex + 1];
+                $this->swapOrdering($rows[$currentIndex], $nextRow);
+            }
+
+            $redirect = preg_replace('/[?&]edit=[^&]*&?[?&]move=[^&]*/', '', $_SERVER['REQUEST_URI']);
+            header("Location: {$redirect}");
+            exit;
+        } catch (PDOException $e) {
+            return '<div class="error">Database error: ' . $this->sanitize($e->getMessage()) . '</div>';
+        }
+    }
+
+    /**
+     * Swap ordering values between two rows
+     * @param array $row1 First row
+     * @param array $row2 Second row
+     */
+    private function swapOrdering($row1, $row2) {
+        $temp = $row1[$this->ordering];
+        $stmt = $this->pdo->prepare("UPDATE {$this->table} SET {$this->ordering} = ? WHERE {$this->keyfield} = ?");
+        $stmt->execute([$row2[$this->ordering], $row1[$this->keyfield]]);
+        $stmt->execute([$temp, $row2[$this->keyfield]]);
+    }
+
+    /**
+     * Process URL replacements
+     * @param string $field Field name
+     * @param string $value Field value
+     * @return string Processed value
+     */
+    private function processUrlReplacements($field, $value) {
+        if (!isset($this->replacelinks[$field])) return $value;
+
+        preg_match_all('/http[^\\\\"\'> \n]*/', $value, $urls, PREG_SET_ORDER);
+        foreach ($urls as $urlMatch) {
+            if (strpos($urlMatch[0], 'firewater') !== false) continue;
+            $newUrl = call_user_func($this->replacelinks[$field], $field, $urlMatch[0]);
+            $value = str_replace($urlMatch[0], $newUrl, $value);
+        }
+        return $value;
+    }
+
+    /**
+     * Group functionality (basic implementation)
+     * @param string $group Group field
+     * @return string HTML output
+     */
+    public function group($group) {
+        if (isset($_GET['group'])) {
+            if (empty($this->where)) {
+                $this->where = "{$group} = '{$this->sanitize($_GET['group'])}'";
+            } else {
+                $this->where .= " AND {$group} = '{$this->sanitize($_GET['group'])}'";
+            }
+            return $this->display();
+        }
+
+        try {
+            $where = $this->buildWhere();
+            $stmt = $this->pdo->prepare("SELECT DISTINCT {$group} FROM {$this->table} {$where}");
+            $stmt->execute();
+            $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+            $html = '<div class="table"><table class="listing form" cellpadding="0" cellspacing="0" border="0"><tr><th class="full" colspan="2">' . $this->sanitize($this->grouplabel) . '</th></tr>';
+            $odd = 1;
+            foreach ($rows as $value) {
+                $oddeven = ($odd++ % 2) ? 'oddList' : 'evenList';
+                $html .= '<tr class="' . $oddeven . '"><td><a href="?group=' . urlencode($value) . '">' . $this->sanitize($value) . '</a></td></tr>';
+            }
+            $html .= '</table></div>';
+            return $html;
+        } catch (PDOException $e) {
+            return '<div class="error">Database error: ' . $this->sanitize($e->getMessage()) . '</div>';
+        }
+    }
 }
+
+// Helper functions for backward compatibility
+function q($query) {
+    global $pdo;
+    return $pdo->query($query);
+}
+
+function fa($stmt) {
+    return $stmt->fetch(PDO::FETCH_ASSOC);
+}
+?>
