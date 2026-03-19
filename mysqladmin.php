@@ -640,12 +640,16 @@ EOF;
      * @return string HTML
      */
     private function renderEnumField($type, $selected, $field) {
-        $values = str_ireplace(['enum(', ')'], '', $type);
-        $values = str_replace("'", '', $values);
+        // Extract enum/set values inside parentheses, allowing for trailing charset/colation options.
+        $values = [];
+        if (preg_match_all("/'([^']*)'/", $type, $matches)) {
+            $values = $matches[1];
+        }
+
         $options = '';
-        foreach (explode(',', $values) as $value) {
-            $sel = (trim($value) == $selected) ? ' selected' : '';
-            $options .= '<option value="' . $this->sanitize(trim($value)) . '"' . $sel . '>' . $this->sanitize(trim($value)) . '</option>';
+        foreach ($values as $value) {
+            $sel = ($value === $selected) ? ' selected' : '';
+            $options .= '<option value="' . $this->sanitize($value) . '"' . $sel . '>' . $this->sanitize($value) . '</option>';
         }
         return '<select name="' . $field . '">' . $options . '</select>';
     }
@@ -715,7 +719,7 @@ EOF;
                 $inputId = 'richtext_edit_' . $field;
                 $html .= '<div class="richtext-editor" data-input-id="' . $inputId . '">' . $this->sanitizeHtml($value) . '</div>';
                 $html .= '<input type="hidden" id="' . $inputId . '" name="' . $field . '" value="' . $this->sanitize($value) . '">';
-            } elseif (preg_match('/^\s*enum\s*\(/i', $cols[$field]) || preg_match('/^\s*set\s*\(/i', $cols[$field])) {
+            } elseif (preg_match('/\b(enum|set)\s*\(/i', $cols[$field])) {
                 $html .= $this->renderEnumField($cols[$field], $value, $field);
             } elseif (stripos($cols[$field], 'text') !== false) {
                 $html .= '<textarea cols="50" rows="6" name="' . $field . '">' . $this->sanitize($value) . '</textarea>';
