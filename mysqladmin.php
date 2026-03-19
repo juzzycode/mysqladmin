@@ -86,6 +86,7 @@ class MysqlAdmin {
     public $grouplabel = '';    // Label for grouping (not fully implemented)
     public $maxentries = 999999; // Maximum entries to show (affects add form visibility)
     public $goback = null;      // URL to redirect after save/delete
+    public $debug = false;      // Enable debug output
 
     // Internal properties
     private $csrf_token;
@@ -223,28 +224,53 @@ class MysqlAdmin {
     line-height: 1.4;
 }
 .debug {
-    background: #ffffcc;
-    border: 1px solid #ffcc00;
-    padding: 10px;
-    margin: 10px 0;
-    font-family: monospace;
+    background: linear-gradient(135deg, #fffacd 0%, #ffffe0 100%);
+    border-left: 4px solid #ffa500;
+    border: 1px solid #daa520;
+    padding: 15px;
+    margin: 15px 0;
+    font-family: 'Courier New', monospace;
     font-size: 12px;
     white-space: pre-wrap;
     word-wrap: break-word;
+    border-radius: 4px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.debug-label {
+    font-weight: bold;
+    color: #d9a500;
+    display: block;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+}
+.debug-content {
+    background: rgba(255,255,255,0.6);
+    padding: 8px;
+    border-radius: 2px;
+    margin: 5px 0;
+    color: #333;
 }
 .error {
-    background: #ffcccc;
-    border: 1px solid #ff0000;
-    padding: 10px;
-    margin: 10px 0;
-    color: #cc0000;
+    background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%);
+    border-left: 4px solid #d32f2f;
+    border: 1px solid #ef5350;
+    padding: 15px;
+    margin: 15px 0;
+    color: #b71c1c;
+    border-radius: 4px;
+    box-shadow: 0 2px 4px rgba(211,47,47,0.2);
 }
 .success {
-    background: #ccffcc;
-    border: 1px solid #00ff00;
-    padding: 10px;
-    margin: 10px 0;
-    color: #00cc00;
+    background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);
+    border-left: 4px solid #2e7d32;
+    border: 1px solid #66bb6a;
+    padding: 15px;
+    margin: 15px 0;
+    color: #1b5e20;
+    border-radius: 4px;
+    box-shadow: 0 2px 4px rgba(46,125,50,0.2);
 }
 </style>
 <script>
@@ -341,22 +367,26 @@ EOF;
 
         // Debug: Show what POST/GET data we received
         $debug = '';
-        if (!empty($_POST)) {
-            $debug .= '<div class="debug">POST data: ' . $this->sanitize(print_r($_POST, true)) . '</div>';
-        }
-        if (!empty($_GET)) {
-            $debug .= '<div class="debug">GET data: ' . $this->sanitize(print_r($_GET, true)) . '</div>';
-        }
-        if (isset($_SESSION['csrf_token'])) {
-            $debug .= '<div class="debug">Session CSRF: ' . $this->sanitize($_SESSION['csrf_token']) . '</div>';
-        }
-        if (isset($_SESSION['edit_id'])) {
-            $debug .= '<div class="debug">Session edit_id: ' . $this->sanitize($_SESSION['edit_id']) . '</div>';
+        if ($this->debug) {
+            if (!empty($_POST)) {
+                $debug .= '<div class="debug"><span class="debug-label">POST Data</span><div class="debug-content">' . htmlspecialchars(print_r($_POST, true), ENT_QUOTES, 'UTF-8') . '</div></div>';
+            }
+            if (!empty($_GET)) {
+                $debug .= '<div class="debug"><span class="debug-label">GET Data</span><div class="debug-content">' . htmlspecialchars(print_r($_GET, true), ENT_QUOTES, 'UTF-8') . '</div></div>';
+            }
+            if (isset($_SESSION['mysqladmin_csrf_token'])) {
+                $debug .= '<div class="debug"><span class="debug-label">Session CSRF Token</span><div class="debug-content">' . htmlspecialchars($_SESSION['mysqladmin_csrf_token'], ENT_QUOTES, 'UTF-8') . '</div></div>';
+            }
+            if (isset($_SESSION['edit_id'])) {
+                $debug .= '<div class="debug"><span class="debug-label">Session Edit ID</span><div class="debug-content">' . htmlspecialchars($_SESSION['edit_id'], ENT_QUOTES, 'UTF-8') . '</div></div>';
+            }
         }
 
         if (isset($_POST['save'])) {
             $csrfValid = $this->validateCsrfToken();
-            $debug .= '<div class="debug">Save action detected. CSRF valid: ' . ($csrfValid ? 'YES' : 'NO') . '</div>';
+            if ($this->debug) {
+                $debug .= '<div class="debug"><span class="debug-label">Save Action</span><div class="debug-content">CSRF Valid: ' . ($csrfValid ? 'YES ✓' : 'NO ✗') . '</div></div>';
+            }
             if ($csrfValid) {
                 return $debug . $this->save();
             } else {
@@ -365,7 +395,9 @@ EOF;
         }
         if (isset($_POST['delete']) && !$this->nodelete) {
             $csrfValid = $this->validateCsrfToken();
-            $debug .= '<div class="debug">Delete action detected. CSRF valid: ' . ($csrfValid ? 'YES' : 'NO') . '</div>';
+            if ($this->debug) {
+                $debug .= '<div class="debug"><span class="debug-label">Delete Action</span><div class="debug-content">CSRF Valid: ' . ($csrfValid ? 'YES ✓' : 'NO ✗') . '</div></div>';
+            }
             if ($csrfValid) {
                 return $debug . $this->delete();
             } else {
@@ -380,7 +412,9 @@ EOF;
         }
         if (isset($_POST['add']) && !$this->disableadd) {
             $csrfValid = $this->validateCsrfToken();
-            $debug .= '<div class="debug">Add action detected. CSRF valid: ' . ($csrfValid ? 'YES' : 'NO') . '</div>';
+            if ($this->debug) {
+                $debug .= '<div class="debug"><span class="debug-label">Add Action</span><div class="debug-content">CSRF Valid: ' . ($csrfValid ? 'YES ✓' : 'NO ✗') . '</div></div>';
+            }
             if ($csrfValid) {
                 return $debug . $this->add();
             } else {
