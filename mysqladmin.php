@@ -589,7 +589,7 @@ EOF;
                 $inputId = 'richtext_add_' . $field;
                 $html .= '<div class="richtext-editor" data-input-id="' . $inputId . '"></div>';
                 $html .= '<input type="hidden" id="' . $inputId . '" name="' . $field . '" value="">';
-            } elseif (stripos($type, 'enum') === 0) {
+            } elseif (preg_match('/^\s*enum\s*\(/i', $type) || preg_match('/^\s*set\s*\(/i', $type)) {
                 $html .= $this->renderEnumField($type, null, $field);
             } elseif (stripos($type, 'text') !== false) {
                 $html .= '<textarea cols="40" rows="6" name="' . $field . '"></textarea>';
@@ -715,7 +715,7 @@ EOF;
                 $inputId = 'richtext_edit_' . $field;
                 $html .= '<div class="richtext-editor" data-input-id="' . $inputId . '">' . $this->sanitizeHtml($value) . '</div>';
                 $html .= '<input type="hidden" id="' . $inputId . '" name="' . $field . '" value="' . $this->sanitize($value) . '">';
-            } elseif (stripos($cols[$field], 'enum') === 0) {
+            } elseif (preg_match('/^\s*enum\s*\(/i', $cols[$field]) || preg_match('/^\s*set\s*\(/i', $cols[$field])) {
                 $html .= $this->renderEnumField($cols[$field], $value, $field);
             } elseif (stripos($cols[$field], 'text') !== false) {
                 $html .= '<textarea cols="50" rows="6" name="' . $field . '">' . $this->sanitize($value) . '</textarea>';
