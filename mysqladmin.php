@@ -96,6 +96,11 @@ class MysqlAdmin {
      * @param PDO $pdo Database connection
      */
     public function __construct(PDO $pdo) {
+        // Ensure session is started
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+        
         $this->pdo = $pdo;
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $this->generateCsrfToken();
@@ -105,17 +110,21 @@ class MysqlAdmin {
      * Generate CSRF token for form protection
      */
     private function generateCsrfToken() {
-        if (!isset($_SESSION['csrf_token'])) {
-            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+        // For security, use a consistent token per session rather than regenerating
+        if (!isset($_SESSION['mysqladmin_csrf_token'])) {
+            $_SESSION['mysqladmin_csrf_token'] = bin2hex(random_bytes(32));
         }
-        $this->csrf_token = $_SESSION['csrf_token'];
+        $this->csrf_token = $_SESSION['mysqladmin_csrf_token'];
     }
 
     /**
      * Validate CSRF token
      */
     private function validateCsrfToken() {
-        return isset($_POST['csrf_token']) && hash_equals($this->csrf_token, $_POST['csrf_token']);
+        if (!isset($_POST['csrf_token'])) {
+            return false;
+        }
+        return hash_equals($this->csrf_token, $_POST['csrf_token']);
     }
 
     /**
